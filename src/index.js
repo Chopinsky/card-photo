@@ -3,10 +3,12 @@ import 'bulma/css/bulma.css';
 import { load } from '@tensorflow-models/deeplab';
 import * as tf from '@tensorflow/tfjs-core';
 
-// const modelNames = ['pascal', 'cityscapes', 'ade20k'];
 const modalName = 'pascal';
-const deeplab = {};
 const state = {};
+
+// deeplab will be storing the model promise
+let deeplab = null;
+let running = false;
 
 const toggleInvisible = (elementId, force = undefined) => {
   const outputContainer = document.getElementById(elementId);
@@ -14,57 +16,77 @@ const toggleInvisible = (elementId, force = undefined) => {
 };
 
 const initializeModels = async () => {
-  const selector = document.getElementById('quantizationBytes');
-  const quantizationBytes =
-    Number(selector.options[selector.selectedIndex].text);
+  await reloadModal();
 
-  state.quantizationBytes = quantizationBytes;
-  deeplab[modalName] = load({ base: modalName, quantizationBytes });
-
-  const runner = document.getElementById(`run-${modalName}`);
+  const runner = document.getElementById('run-pascal');
 
   runner.onclick = async () => {
+    if (running) {
+      return;
+    }
+
+    running = true;
     toggleInvisible('output-card', true);
     toggleInvisible('legend-card', true);
+
     await tf.nextFrame();
     await runDeeplab(modalName);
+    running = false;
   };
 
   const uploader = document.getElementById('upload-image');
   uploader.addEventListener('change', processImages);
 
-  status('Initialised models, waiting for input...');
+  status('model initialized, waiting for input ... ');
 };
 
-const reloadModal = () => {
+const reloadModal = async () => {
   const selector = document.getElementById('quantizationBytes');
-  const quantizationBytes =
-    Number(selector.options[selector.selectedIndex].text);
+  const quantizationBytes = selector
+    ? Number(selector.options[selector.selectedIndex].text)
+    : 4;
 
   state.quantizationBytes = quantizationBytes;
-  deeplab[modalName] = load({ base: modalName, quantizationBytes });
-};
 
-const setImage = (src) => {
-  toggleInvisible('output-card', true);
-  toggleInvisible('legend-card', true);
+  status('Loading the model...');
 
-  const image = document.getElementById('input-image');
-  image.src = src;
+  const loadingStart = performance.now();
+  deeplab = load({ base: modalName, quantizationBytes });
 
-  toggleInvisible('input-card', false);
-  status('Waiting until the model is picked...');
+  // await the model to be fully loaded before proceeding
+  await deeplab;
+
+  status(`Loaded the model in ${
+    ((performance.now() - loadingStart) / 1000).toFixed(2)} s`);
 };
 
 const processImage = (file) => {
+  console.log(file.type);
+
   if (!file.type.match('image.*')) {
     return;
   }
 
   const reader = new FileReader();
 
-  reader.onload = (event) => {
-    setImage(event.target.result);
+  reader.onload = async (event) => {
+    const src = event.target.result;
+
+    toggleInvisible('output-card', true);
+    toggleInvisible('legend-card', true);
+
+    const image = document.getElementById('input-image');
+    image.src = src;
+
+    toggleInvisible('input-card', false);
+    status('Image loaded ... ');
+
+    image.onload = async () => {
+      running = true;
+      await tf.nextFrame();
+      await runDeeplab(modalName);
+      running = false;
+    };
   };
 
   reader.readAsDataURL(file);
@@ -72,12 +94,13 @@ const processImage = (file) => {
 
 const processImages = (event) => {
   const files = event.target.files;
-  Array.from(files).forEach(processImage);
+
+  if (files && files.length > 0) {
+    processImage(files[0]);
+  }
 };
 
 const displaySegmentationMap = (modelName, deeplabOutput) => {
-  // console.log("ready to display image ... ");
-
   const { legend, height, width, segmentationMap } = deeplabOutput;
   const canvas = document.getElementById('output-image');
   const ctx = canvas.getContext('2d');
@@ -128,7 +151,7 @@ const status = (message) => {
 };
 
 const runPrediction = (modelName, input, initialisationStart) => {
-  deeplab[modelName].then((model) => {
+  deeplab.then((model) => {
     model.segment(input).then((output) => {
       displaySegmentationMap(modelName, output);
       status(`Ran in ${
@@ -141,26 +164,18 @@ const runDeeplab = async (modelName) => {
   status(`Running the inference...`);
 
   const selector = document.getElementById('quantizationBytes');
-
   const quantizationBytes =
     Number(selector.options[selector.selectedIndex].text);
 
   if (state.quantizationBytes !== quantizationBytes) {
-    // for (const base of modelNames) {
-    //   if (deeplab[base]) {
-    //     (await deeplab[base]).dispose();
-    //     deeplab[base] = undefined;
-    //   }
-    // };
-
-    deeplab.dispose();
-    deeplab = {};
+    // reset the deeplab model
+    await deeplab.dispose();
+    deeplab = null;
 
     state.quantizationBytes = quantizationBytes;
   }
 
   const input = document.getElementById('input-image');
-
   if (!input.src || !input.src.length || input.src.length === 0) {
     status('Failed! Please load an image first.');
     return;
@@ -168,24 +183,23 @@ const runDeeplab = async (modelName) => {
 
   toggleInvisible('input-card', false);
 
-  if (!deeplab[modelName]) {
-    status('Loading the model...');
-    const loadingStart = performance.now();
-    deeplab[modelName] = load({ base: modelName, quantizationBytes });
-    await deeplab[modelName];
-    status(`Loaded the model in ${
-      ((performance.now() - loadingStart) / 1000).toFixed(2)} s`);
+  // if the model is not yet loaded, do it now
+  if (!deeplab) {
+    await reloadModal();
   }
 
   const predictionStart = performance.now();
 
   if (input.complete && input.naturalHeight !== 0) {
     runPrediction(modelName, input, predictionStart);
-  } else {
-    input.onload = () => {
-      runPrediction(modelName, input, predictionStart);
-    };
+    return;
   }
+
+  input.onload = () => {
+    // if the image is still loading while the model is hit run,
+    // queue the prediction on load complete
+    runPrediction(modelName, input, predictionStart);
+  };
 };
 
 window.onload = initializeModels;
